@@ -36,7 +36,7 @@ class PositionalEncoding(nn.Module):
         return x
 
 
-class Input(nn.Module):
+class Embedding(nn.Module):
     def __init__(self, vocab_size, dim, pad_id, drop_prob):
         super().__init__()
 
@@ -204,7 +204,7 @@ class Encoder(nn.Module):
         self.mlp_dim = mlp_dim
         self.n_layers = n_layers
 
-        self.input = Input(
+        self.input = Embedding(
             vocab_size=src_vocab_size, dim=dim, pad_id=src_pad_id, drop_prob=embed_drop_prob,
         )
         self.enc_stack = nn.ModuleList(
@@ -281,7 +281,7 @@ class Decoder(nn.Module):
         self.dim = dim
         self.n_layers = n_layers
 
-        self.input = Input(
+        self.input = Embedding(
             vocab_size=trg_vocab_size, dim=dim, pad_id=trg_pad_id, drop_prob=embed_drop_prob,
         )
         self.dec_stack = nn.ModuleList(
