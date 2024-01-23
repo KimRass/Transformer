@@ -9,14 +9,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from typing import Literal
 
 torch.set_printoptions(precision=3, edgeitems=4, linewidth=sys.maxsize)
-
-D_MODEL = 512
-N_HEADS = 8
-N_LAYERS = 6
-DROP_PROB = 0.1 # "For the base model, we use a rate of $P_{drop} = 0.1$."
 
 
 class PositionalEncoding(nn.Module):
@@ -43,7 +37,7 @@ class PositionalEncoding(nn.Module):
 
 
 class Input(nn.Module):
-    def __init__(self, vocab_size, dim, pad_id=0, drop_prob=DROP_PROB):
+    def __init__(self, vocab_size, dim, pad_id, drop_prob):
         super().__init__()
 
         self.vocab_size = vocab_size
@@ -68,7 +62,7 @@ class Input(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, dim, n_heads, drop_prob=DROP_PROB):
+    def __init__(self, dim, n_heads, drop_prob):
         super().__init__()
     
         self.dim = dim # "$d_{model}$"
@@ -90,12 +84,16 @@ class MultiHeadAttention(nn.Module):
         return attn_score
 
     def forward(self, q, k, v, mask=None):
-        b, l, _ = q.shape
+        b, i, _ = q.shape
+        _, j, _ = k.shape
 
-        q, k, v = self.q_proj(q), self.k_proj(k), self.v_proj(v)
-        q = q.view(b, self.n_heads, l, self.head_dim)
-        k = k.view(b, self.n_heads, l, self.head_dim)
-        v = v.view(b, self.n_heads, l, self.head_dim)
+        q = self.q_proj(q)
+        k = self.k_proj(k)
+        v = self.v_proj(v)
+
+        q = q.view(b, self.n_heads, i, self.head_dim)
+        k = k.view(b, self.n_heads, j, self.head_dim)
+        v = v.view(b, self.n_heads, j, self.head_dim)
 
         attn_score = self._get_attention_score(q=q, k=k)
         if mask is not None:
@@ -103,56 +101,50 @@ class MultiHeadAttention(nn.Module):
         attn_score /= (self.head_dim ** 0.5) # "Scale"
 
         attn_weight = F.softmax(attn_score, dim=3) # "Softmax"
-        attn_weight = self.attn_drop(attn_weight) # Not in the paper
+        attn_weight_drop = self.attn_drop(attn_weight) # Not in the paper
 
-        x = torch.einsum("bnij,bnjd->bnid", attn_weight, v) # "MatMul"
+        x = torch.einsum("bnij,bnjd->bnid", attn_weight_drop, v) # "MatMul"
         x = rearrange(x, pattern="b n i d -> b i (n d)")
 
         x = self.out_proj(x)
-        return x
+        return x, attn_weight
 
 
 class ResidualConnection(nn.Module):
-    def __init__(self, dim, drop_prob=DROP_PROB):
+    def __init__(self, dim, drop_prob):
         super().__init__()
-
-        self.dim = dim
-        self.drop_prob = drop_prob
 
         self.resid_drop = nn.Dropout(drop_prob) # "Residual dropout"
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, x, sublayer):
         # "Multi-Head Attention", "Masked Multi-Head Attention" or "Feed Forward"
-        out = sublayer(x)
-        # in "Figure 1" of the paper
+        skip = x.clone()
+        x = sublayer(x)
         # "We apply dropout to the output of each sub-layer, before it is added
         # to the sub-layer input and normalized."
-        out = self.resid_drop(out)
-        x += out # "Add"
+        x = self.resid_drop(x)
+        x += skip # "Add"
         x = self.norm(x) # "& Norm"
         return x
 
 
 class PositionwiseFeedForward(nn.Module):
-    def __init__(
-        self, dim, mlp_dim, activ: Literal["relu", "gelu"]="relu", drop_prob=DROP_PROB,
-    ):
+    def __init__(self, dim, mlp_dim, drop_prob, activ="relu"):
         super().__init__()
 
-        assert activ in ["relu", "gelu"],\
+        assert activ in ["relu", "gelu"], (
             """The argument `activ` must be one of (`"relu"`, `"gelu"`)"""
+        )
 
-        self.dim = dim
-        self.mlp_dim = mlp_dim
         self.activ = activ
 
-        self.proj1 = nn.Linear(dim, self.mlp_dim) # "$W_{1}$"
+        self.proj1 = nn.Linear(dim, mlp_dim) # "$W_{1}$"
         if activ == "relu":
             self.relu = nn.ReLU()
         else:
             self.gelu = nn.GELU()
-        self.proj2 = nn.Linear(self.mlp_dim, dim) # "$W_{2}$"
+        self.proj2 = nn.Linear(mlp_dim, dim) # "$W_{2}$"
         self.mlp_drop = nn.Dropout(drop_prob)
 
     def forward(self, x):
@@ -167,7 +159,9 @@ class PositionwiseFeedForward(nn.Module):
 
 
 class EncoderLayer(nn.Module):
-    def __init__(self, dim, n_heads, mlp_dim, attn_drop_prob=DROP_PROB, resid_drop_prob=DROP_PROB):
+    def __init__(
+        self, dim, n_heads, mlp_dim, attn_drop_prob, ff_drop_prob, resid_drop_prob,
+    ):
         super().__init__()
 
         self.n_heads = n_heads
@@ -176,11 +170,15 @@ class EncoderLayer(nn.Module):
 
         self.self_attn = MultiHeadAttention(dim=dim, n_heads=n_heads, drop_prob=attn_drop_prob)
         self.attn_resid_conn = ResidualConnection(dim=dim, drop_prob=resid_drop_prob)
-        self.feed_forward = PositionwiseFeedForward(dim=dim, mlp_dim=mlp_dim, activ="relu")
+        self.feed_forward = PositionwiseFeedForward(
+            dim=dim, mlp_dim=mlp_dim, drop_prob=ff_drop_prob, activ="relu",
+        )
         self.ff_resid_conn = ResidualConnection(dim=dim, drop_prob=resid_drop_prob)
 
     def forward(self, x, mask=None):
-        x = self.attn_resid_conn(x=x, sublayer=lambda x: self.self_attn(q=x, k=x, v=x, mask=mask))
+        x = self.attn_resid_conn(
+            x=x, sublayer=lambda x: self.self_attn(q=x, k=x, v=x, mask=mask)[0],
+        )
         x = self.ff_resid_conn(x=x, sublayer=self.feed_forward)
         return x
 
@@ -189,27 +187,26 @@ class Encoder(nn.Module):
     def __init__(
         self,
         src_vocab_size,
-        src_seq_len,
         src_pad_id,
         n_heads,
         dim,
         mlp_dim,
         n_layers,
-        embed_drop_prob=DROP_PROB,
-        attn_drop_prob=DROP_PROB,
-        resid_drop_prob=DROP_PROB
+        embed_drop_prob,
+        attn_drop_prob,
+        ff_drop_prob,
+        resid_drop_prob,
     ):
         super().__init__()
 
-        self.src_vocab_size = src_vocab_size
-        self.src_seq_len = src_seq_len
-        self.src_pad_id = src_pad_id
         self.n_heads = n_heads
         self.dim = dim
         self.mlp_dim = mlp_dim
         self.n_layers = n_layers
 
-        self.input = Input(vocab_size=src_vocab_size, dim=dim, pad_id=src_pad_id, drop_prob=embed_drop_prob)
+        self.input = Input(
+            vocab_size=src_vocab_size, dim=dim, pad_id=src_pad_id, drop_prob=embed_drop_prob,
+        )
         self.enc_stack = nn.ModuleList(
             [
                 EncoderLayer(
@@ -217,6 +214,7 @@ class Encoder(nn.Module):
                     dim=dim,
                     mlp_dim=mlp_dim,
                     attn_drop_prob=attn_drop_prob,
+                    ff_drop_prob=ff_drop_prob,
                     resid_drop_prob=resid_drop_prob,
                 )
                 for _ in range(self.n_layers)
@@ -231,7 +229,9 @@ class Encoder(nn.Module):
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, n_heads, dim, mlp_dim, attn_drop_prob=DROP_PROB, resid_drop_prob=DROP_PROB):
+    def __init__(
+        self, n_heads, dim, mlp_dim, attn_drop_prob, ff_drop_prob, resid_drop_prob,
+    ):
         super().__init__()
 
         self.n_heads = n_heads
@@ -242,15 +242,20 @@ class DecoderLayer(nn.Module):
         self.self_attn_resid_conn = ResidualConnection(dim=dim, drop_prob=resid_drop_prob)
         self.enc_dec_attn = MultiHeadAttention(dim=dim, n_heads=n_heads, drop_prob=attn_drop_prob)
         self.enc_dec_attn_resid_conn = ResidualConnection(dim=dim, drop_prob=resid_drop_prob)
-        self.feed_forward = PositionwiseFeedForward(dim=dim, mlp_dim=mlp_dim, activ="relu")
+        self.feed_forward = PositionwiseFeedForward(
+            dim=dim, mlp_dim=mlp_dim, drop_prob=ff_drop_prob, activ="relu",
+        )
         self.ff_resid_conn = ResidualConnection(dim=dim, drop_prob=resid_drop_prob)
 
     def forward(self, x, enc_out, self_attn_mask, enc_dec_attn_mask):
         x = self.self_attn_resid_conn(
-            x=x, sublayer=lambda x: self.self_attn(q=x, k=x, v=x, mask=self_attn_mask)
+            x=x, sublayer=lambda x: self.self_attn(q=x, k=x, v=x, mask=self_attn_mask)[0],
         )
         x = self.enc_dec_attn_resid_conn(
-            x=x, sublayer=lambda x: self.enc_dec_attn(q=x, k=enc_out, v=enc_out, mask=enc_dec_attn_mask)
+            x=x,
+            sublayer=lambda x: self.enc_dec_attn(
+                q=x, k=enc_out, v=enc_out, mask=enc_dec_attn_mask,
+            )[0]
         )
         x = self.ff_resid_conn(x=x, sublayer=self.feed_forward)
         return x
@@ -260,26 +265,25 @@ class Decoder(nn.Module):
     def __init__(
         self,
         trg_vocab_size,
-        trg_seq_len,
         trg_pad_id,
         n_heads,
         dim,
         mlp_dim,
         n_layers,
-        embed_drop_prob=DROP_PROB,
-        attn_drop_prob=DROP_PROB,
-        resid_drop_prob=DROP_PROB,
+        embed_drop_prob,
+        attn_drop_prob,
+        ff_drop_prob,
+        resid_drop_prob,
     ):
         super().__init__()
 
-        self.trg_vocab_size = trg_vocab_size
-        self.trg_seq_len = trg_seq_len
-        self.trg_pad_id = trg_pad_id
         self.n_heads = n_heads
         self.dim = dim
         self.n_layers = n_layers
 
-        self.input = Input(vocab_size=trg_vocab_size, dim=dim, pad_id=trg_pad_id, drop_prob=embed_drop_prob)
+        self.input = Input(
+            vocab_size=trg_vocab_size, dim=dim, pad_id=trg_pad_id, drop_prob=embed_drop_prob,
+        )
         self.dec_stack = nn.ModuleList(
             [
                 DecoderLayer(
@@ -287,6 +291,7 @@ class Decoder(nn.Module):
                     dim=dim,
                     mlp_dim=mlp_dim,
                     attn_drop_prob=attn_drop_prob,
+                    ff_drop_prob=ff_drop_prob,
                     resid_drop_prob=resid_drop_prob,
                 )
                 for _ in range(self.n_layers)
@@ -297,12 +302,15 @@ class Decoder(nn.Module):
     def forward(self, x, enc_out, self_attn_mask=None, enc_dec_attn_mask=None):
         x = self.input(x)
         for dec_layer in self.dec_stack:
-            x = dec_layer(x, enc_out=enc_out, self_attn_mask=self_attn_mask, enc_dec_attn_mask=enc_dec_attn_mask)
+            x = dec_layer(
+                x, enc_out=enc_out, self_attn_mask=self_attn_mask, enc_dec_attn_mask=enc_dec_attn_mask,
+            )
         x = self.linear(x)
         x = F.softmax(x, dim=-1)
         return x
 
 
+DROP_PROB = 0.1 # "For the base model, we use a rate of $P_{drop} = 0.1$."
 class Transformer(nn.Module):
     def __init__(
         self,
@@ -312,21 +320,17 @@ class Transformer(nn.Module):
         trg_seq_len,
         src_pad_id,
         trg_pad_id,
-        n_heads=N_HEADS,
-        dim=D_MODEL,
-        mlp_dim=D_MODEL * 4,
-        n_layers=N_LAYERS,
+        n_heads=8,
+        dim=512,
+        mlp_dim=512 * 4,
+        n_layers=6,
         embed_drop_prob=DROP_PROB,
         attn_drop_prob=DROP_PROB,
+        ff_drop_prob=DROP_PROB,
         resid_drop_prob=DROP_PROB,
     ):
         super().__init__()
 
-        assert src_vocab_size == trg_vocab_size, "`src_vocab_size` and `trg_vocab_size` should be equal."
-        assert src_seq_len == trg_seq_len, "`src_seq_len` and `trg_seq_len` should be equal."
-
-        self.src_vocab_size = src_vocab_size
-        self.trg_vocab_size = trg_vocab_size
         self.src_seq_len = src_seq_len
         self.trg_seq_len = trg_seq_len
         self.src_pad_id = src_pad_id
@@ -334,7 +338,6 @@ class Transformer(nn.Module):
 
         self.enc = Encoder(
             src_vocab_size=src_vocab_size,
-            src_seq_len=src_seq_len,
             src_pad_id=src_pad_id,
             n_heads=n_heads,
             dim=dim,
@@ -342,11 +345,11 @@ class Transformer(nn.Module):
             n_layers=n_layers,
             embed_drop_prob=embed_drop_prob,
             attn_drop_prob=attn_drop_prob,
+            ff_drop_prob=ff_drop_prob,
             resid_drop_prob=resid_drop_prob,
         )
         self.dec = Decoder(
             trg_vocab_size=trg_vocab_size,
-            trg_seq_len=trg_seq_len,
             trg_pad_id=trg_pad_id,
             n_heads=n_heads,
             dim=dim,
@@ -354,39 +357,39 @@ class Transformer(nn.Module):
             n_layers=n_layers,
             embed_drop_prob=embed_drop_prob,
             attn_drop_prob=attn_drop_prob,
+            ff_drop_prob=ff_drop_prob,
             resid_drop_prob=resid_drop_prob,
         )
 
-        # "We share the same weight matrix between the two embedding layers
-        # and the pre-softmax linear transformation"
-        self.dec.input.embed.weight = self.enc.input.embed.weight
+        if src_vocab_size == trg_vocab_size:
+            # "We share the same weight matrix between the two embedding layers
+            # and the pre-softmax linear transformation"
+            self.dec.input.embed.weight = self.enc.input.embed.weight
         self.dec.linear.weight = self.dec.input.embed.weight
 
     @staticmethod
-    def _get_pad_mask(seq, pad_id=0):
+    def _get_pad_mask(seq, pad_id):
         mask = (seq == pad_id).unsqueeze(1).unsqueeze(2)
         return mask
 
     # "Prevent positions from attending to subsequent positions."
-    @staticmethod
-    def _get_causal_mask(src_seq_len, trg_seq_len):
-        ones = torch.ones(size=(trg_seq_len, src_seq_len))
+    def _get_causal_mask(self):
+        ones = torch.ones(size=(self.trg_seq_len, self.trg_seq_len))
         mask = torch.triu(ones, diagonal=1).bool()
         mask = mask.unsqueeze(0).unsqueeze(1)
         return mask
 
     def forward(self, src_seq, trg_seq):
-        src_mask = self._get_pad_mask(seq=src_seq, pad_id=self.src_pad_id)
+        src_pad_mask = self._get_pad_mask(seq=src_seq, pad_id=self.src_pad_id)
         trg_pad_mask = self._get_pad_mask(seq=trg_seq, pad_id=self.trg_pad_id)
-        causal_mask = self._get_causal_mask(src_seq_len=self.src_seq_len, trg_seq_len=self.trg_seq_len)
-        trg_mask = trg_pad_mask | causal_mask
+        trg_causal_mask = self._get_causal_mask()
 
-        enc_out = self.enc(src_seq, self_attn_mask=src_mask)
+        enc_out = self.enc(src_seq, self_attn_mask=src_pad_mask)
         dec_out = self.dec(
             trg_seq,
             enc_out=enc_out,
-            self_attn_mask=trg_pad_mask,
-            enc_dec_attn_mask=trg_mask,
+            self_attn_mask=trg_pad_mask | trg_causal_mask,
+            enc_dec_attn_mask=src_pad_mask, # Source가 Query가 되고 Target이 Key가 됩니다!
         )
         return dec_out
 
@@ -394,26 +397,28 @@ class Transformer(nn.Module):
 if __name__ == "__main__":
     BATCH_SIZE = 1
     SRC_SEQ_LEN = 4
-    TRG_SEQ_LEN = 4
-    VOCAB_SIZE = 1000
+    TRG_SEQ_LEN = 6
+    SRC_VOCAB_SIZE = 5000
+    TRG_VOCAB_SIZE = 4000
     SRC_PAD_ID = 0
     TRG_PAD_ID = 0
+    N_HEADS = 4
+    N_LAYERS = 2
+
+    src_seq = torch.randint(low=0, high=SRC_VOCAB_SIZE, size=(BATCH_SIZE, SRC_SEQ_LEN))
+    src_seq[:, -1:] = 0
+    trg_seq = torch.randint(low=0, high=TRG_VOCAB_SIZE, size=(BATCH_SIZE, TRG_SEQ_LEN))
+    trg_seq[:, -2:] = 0
 
     transformer = Transformer(
-        src_vocab_size=VOCAB_SIZE,
-        trg_vocab_size=VOCAB_SIZE,
+        src_vocab_size=SRC_VOCAB_SIZE,
+        trg_vocab_size=TRG_VOCAB_SIZE,
         src_seq_len=SRC_SEQ_LEN,
         trg_seq_len=TRG_SEQ_LEN,
         src_pad_id=SRC_PAD_ID,
         trg_pad_id=TRG_PAD_ID,
-        n_heads=1,
-        n_layers=1,
+        n_heads=N_HEADS,
+        n_layers=N_LAYERS,
     )
 
-    src_seq = torch.randint(low=0, high=VOCAB_SIZE, size=(BATCH_SIZE, SRC_SEQ_LEN))
-    src_seq[:, -1:] = 0
-    trg_seq = torch.randint(low=0, high=VOCAB_SIZE, size=(BATCH_SIZE, TRG_SEQ_LEN))
-    trg_seq[:, -2:] = 0
-
     out = transformer(src_seq=src_seq, trg_seq=trg_seq)
-    # print(out.shape)
