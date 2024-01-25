@@ -110,25 +110,6 @@ class MultiHeadAttention(nn.Module):
         return x, attn_weight
 
 
-class ResidualConnection(nn.Module):
-    def __init__(self, dim, drop_prob):
-        super().__init__()
-
-        self.resid_drop = nn.Dropout(drop_prob) # "Residual dropout"
-        self.norm = nn.LayerNorm(dim)
-
-    def forward(self, x, sublayer):
-        # "Multi-Head Attention", "Masked Multi-Head Attention" or "Feed Forward"
-        skip = x.clone()
-        x = sublayer(x)
-        # "We apply dropout to the output of each sub-layer, before it is added
-        # to the sub-layer input and normalized."
-        x = self.resid_drop(x)
-        x += skip # "Add"
-        x = self.norm(x) # "& Norm"
-        return x
-
-
 class PositionwiseFeedForward(nn.Module):
     def __init__(self, dim, mlp_dim, drop_prob, activ="relu"):
         super().__init__()
@@ -155,6 +136,25 @@ class PositionwiseFeedForward(nn.Module):
             x = self.gelu(x)
         x = self.proj2(x)
         x = self.mlp_drop(x) # Not in the paper
+        return x
+
+
+class ResidualConnection(nn.Module):
+    def __init__(self, dim, drop_prob):
+        super().__init__()
+
+        self.resid_drop = nn.Dropout(drop_prob) # "Residual dropout"
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, x, sublayer):
+        # "Multi-Head Attention", "Masked Multi-Head Attention" or "Feed Forward"
+        skip = x.clone()
+        x = sublayer(x)
+        # "We apply dropout to the output of each sub-layer, before it is added
+        # to the sub-layer input and normalized."
+        x = self.resid_drop(x)
+        x += skip # "Add"
+        x = self.norm(x) # "& Norm"
         return x
 
 
