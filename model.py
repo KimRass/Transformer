@@ -99,10 +99,9 @@ class MultiHeadAttention(nn.Module):
         if mask is not None:
             attn_score.masked_fill_(mask=mask, value=-1e9) # "Mask (opt.)"
         attn_score /= (self.head_dim ** 0.5) # "Scale"
-
         attn_weight = F.softmax(attn_score, dim=3) # "Softmax"
-        attn_weight_drop = self.attn_drop(attn_weight) # Not in the paper
 
+        attn_weight_drop = self.attn_drop(attn_weight) # Not in the paper
         x = torch.einsum("bnij,bnjd->bnid", attn_weight_drop, v) # "MatMul"
         x = rearrange(x, pattern="b n i d -> b i (n d)")
 
