@@ -32,6 +32,8 @@ class PositionalEncoding(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         _, l, _ = x.shape
+        # "We apply dropout to the sums of the embeddings and the positional encodings in both
+        # the encoder and decoder stacks."
         x += self.pe_mat.unsqueeze(0)[:, : l, :]
         return x
 
@@ -55,8 +57,6 @@ class Embedding(nn.Module):
         # "In the embedding layers we multiply those weights by $\sqrt{d_{text{model}}}$."
         x *= (self.dim ** 0.5)
         x = self.pos_enc(x)
-        # "We apply dropout to the sums of the embeddings and the positional encodings in both
-        # the encoder and decoder stacks."
         x = self.embed_drop(x)
         return x
 
@@ -305,7 +305,6 @@ class Decoder(nn.Module):
                 x, enc_out=enc_out, self_attn_mask=self_attn_mask, enc_dec_attn_mask=enc_dec_attn_mask,
             )
         x = self.linear(x)
-        x = F.softmax(x, dim=-1)
         return x
 
 
@@ -315,8 +314,8 @@ class Transformer(nn.Module):
         self,
         src_vocab_size,
         trg_vocab_size,
-        src_seq_len,
-        trg_seq_len,
+        src_max_len,
+        trg_max_len,
         src_pad_id,
         trg_pad_id,
         n_heads=8,
@@ -330,8 +329,8 @@ class Transformer(nn.Module):
     ):
         super().__init__()
 
-        self.src_seq_len = src_seq_len
-        self.trg_seq_len = trg_seq_len
+        self.src_max_len = src_max_len
+        self.trg_max_len = trg_max_len
         self.src_pad_id = src_pad_id
         self.trg_pad_id = trg_pad_id
 
@@ -373,7 +372,7 @@ class Transformer(nn.Module):
 
     # "Prevent positions from attending to subsequent positions."
     def _get_causal_mask(self):
-        ones = torch.ones(size=(self.trg_seq_len, self.trg_seq_len))
+        ones = torch.ones(size=(self.trg_max_len, self.trg_max_len))
         mask = torch.triu(ones, diagonal=1).bool()
         mask = mask.unsqueeze(0).unsqueeze(1)
         return mask
@@ -395,8 +394,8 @@ class Transformer(nn.Module):
 
 if __name__ == "__main__":
     BATCH_SIZE = 1
-    SRC_SEQ_LEN = 4
-    TRG_SEQ_LEN = 6
+    SRC_MAX_LEN = 4
+    TRG_MAX_LEN = 6
     SRC_VOCAB_SIZE = 5000
     TRG_VOCAB_SIZE = 4000
     SRC_PAD_ID = 0
@@ -404,16 +403,16 @@ if __name__ == "__main__":
     N_HEADS = 4
     N_LAYERS = 2
 
-    src_seq = torch.randint(low=0, high=SRC_VOCAB_SIZE, size=(BATCH_SIZE, SRC_SEQ_LEN))
+    src_seq = torch.randint(low=0, high=SRC_VOCAB_SIZE, size=(BATCH_SIZE, SRC_MAX_LEN))
     src_seq[:, -1:] = 0
-    trg_seq = torch.randint(low=0, high=TRG_VOCAB_SIZE, size=(BATCH_SIZE, TRG_SEQ_LEN))
+    trg_seq = torch.randint(low=0, high=TRG_VOCAB_SIZE, size=(BATCH_SIZE, TRG_MAX_LEN))
     trg_seq[:, -2:] = 0
 
     transformer = Transformer(
         src_vocab_size=SRC_VOCAB_SIZE,
         trg_vocab_size=TRG_VOCAB_SIZE,
-        src_seq_len=SRC_SEQ_LEN,
-        trg_seq_len=TRG_SEQ_LEN,
+        src_max_len=SRC_MAX_LEN,
+        trg_max_len=TRG_MAX_LEN,
         src_pad_id=SRC_PAD_ID,
         trg_pad_id=TRG_PAD_ID,
         n_heads=N_HEADS,
