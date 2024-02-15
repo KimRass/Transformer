@@ -4,13 +4,12 @@
     # https://wikidocs.net/31379
     # https://paul-hyun.github.io/transformer-02/
 
-import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-torch.set_printoptions(precision=3, edgeitems=4, linewidth=sys.maxsize)
+torch.set_printoptions(linewidth=70)
 
 
 class PositionalEncoding(nn.Module):
