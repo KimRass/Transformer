@@ -3,16 +3,25 @@
     # https://github.com/huggingface/pytorch-image-models/blob/624266148d8fa5ddb22a6f5e523a53aaf0e8a9eb/timm/models/vision_transformer.py#L216
     # https://wikidocs.net/31379
     # https://paul-hyun.github.io/transformer-02/
+    # https://docs.google.com/spreadsheets/d/19ExFP0ruc7Qxl3rM8VMw1B3zQycz4oWZrBcodBTokSA/edit#gid=1216862191
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
+import einops
 
 torch.set_printoptions(linewidth=70)
 
 
 class PositionalEncoding(nn.Module):
+    """
+    "We apply dropout to the sums of the embeddings and the positional
+        encodings in both the encoder and decoder stacks."
+    "$$text{PE}_(\text{pos}, 2i)
+        = $\sin(\text{pos} / 10000^{2 * i  / d_{\text{model}}})$$"
+    "$$text{PE}_(\text{pos}, 2i + 1)
+        = $\cos(\text{pos} / 10000^{2 * i  / d_{\text{model}}})$$"
+    """
     def __init__(self, dim: int, max_len: int=5000) -> None:
         super().__init__()
 
@@ -20,24 +29,25 @@ class PositionalEncoding(nn.Module):
 
         pos = torch.arange(max_len).unsqueeze(1) # "$pos$"
         i = torch.arange(dim // 2).unsqueeze(0) # "$i$"
-        # "$\sin(\text{pos} / 10000^{2 * i  / d_{\text{model}}})$"
         angle = pos / (10_000 ** (2 * i / dim))
 
         self.pe_mat = torch.zeros(size=(max_len, dim))
-        self.pe_mat[:, 0:: 2] = torch.sin(angle) # "$text{PE}_(\text{pos}, 2i)$"
-        self.pe_mat[:, 1:: 2] = torch.cos(angle) # "$text{PE}_(\text{pos}, 2i + 1)$"
+        self.pe_mat[:, 0:: 2] = torch.sin(angle)
+        self.pe_mat[:, 1:: 2] = torch.cos(angle)
 
         self.register_buffer("pos_enc_mat", self.pe_mat)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         _, l, _ = x.shape
-        # "We apply dropout to the sums of the embeddings and the positional encodings in both
-        # the encoder and decoder stacks."
         x += self.pe_mat.unsqueeze(0)[:, : l, :]
         return x
 
 
 class Embedding(nn.Module):
+    """
+    "In the embedding layers we multiply those weights by
+        $\sqrt{d_{text{model}}}$."
+    """
     def __init__(self, vocab_size, dim, pad_id, drop_prob):
         super().__init__()
 
@@ -53,7 +63,6 @@ class Embedding(nn.Module):
 
     def forward(self, x):
         x = self.embed(x)
-        # "In the embedding layers we multiply those weights by $\sqrt{d_{text{model}}}$."
         x *= (self.dim ** 0.5)
         x = self.pos_enc(x)
         x = self.embed_drop(x)
@@ -61,6 +70,16 @@ class Embedding(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
+    """
+    Instead of performing a single attention function with
+        $d_{model}$-dimensional keys, values and queries, we found it
+        beneficial to linearly project the queries, keys and values $h$ times
+        with different, learned linear projections to $d_{k}$, $d_{k}$ and
+        $d_{v}$ dimensions, respectively. On each of these projected versions
+        of queries, keys and values we then perform the attention function in
+        parallel, yielding $d_{v}$-dimensional output values. These are
+        concatenated and once again projected, resulting in the final values.
+    """
     def __init__(self, dim, n_heads, drop_prob):
         super().__init__()
     
@@ -78,7 +97,6 @@ class MultiHeadAttention(nn.Module):
 
     @staticmethod
     def _get_attention_score(q, k):
-        # "MatMul" in "Figure 2" of the paper
         attn_score = torch.einsum("bnid,bnjd->bnij", q, k)
         return attn_score
 
@@ -96,19 +114,31 @@ class MultiHeadAttention(nn.Module):
 
         attn_score = self._get_attention_score(q=q, k=k)
         if mask is not None:
+            mask = einops.repeat(
+                mask, pattern="b i j -> b n i j", n=self.n_heads,
+            )
+            # print(attn_score.shape, mask.shape)
+            # print(mask[0, 0])
             attn_score.masked_fill_(mask=mask, value=-1e9) # "Mask (opt.)"
         attn_score /= (self.head_dim ** 0.5) # "Scale"
         attn_weight = F.softmax(attn_score, dim=3) # "Softmax"
 
         attn_weight_drop = self.attn_drop(attn_weight) # Not in the paper
         x = torch.einsum("bnij,bnjd->bnid", attn_weight_drop, v) # "MatMul"
-        x = rearrange(x, pattern="b n i d -> b i (n d)")
+        x = einops.rearrange(x, pattern="b n i d -> b i (n d)")
 
         x = self.out_proj(x)
         return x, attn_weight
 
 
 class PositionwiseFeedForward(nn.Module):
+    """
+    "Eeach of the layers in our encoder and decoder contains a fully connected
+        feed-forward network, which is applied to each position separately and
+        identically. This consists of two linear transformations with a ReLU
+        activation in between.
+        $$\text{FFN}(x) = \max(0, xW_{1} + b_{1} )W_{2} + b_{2}$$
+    """
     def __init__(self, dim, mlp_dim, drop_prob, activ="relu"):
         super().__init__()
 
@@ -138,6 +168,10 @@ class PositionwiseFeedForward(nn.Module):
 
 
 class ResidualConnection(nn.Module):
+    """
+    "We apply dropout to the output of each sub-layer, before it is added to
+    the sub-layer input and normalized."
+    """
     def __init__(self, dim, drop_prob):
         super().__init__()
 
@@ -145,11 +179,8 @@ class ResidualConnection(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, x, sublayer):
-        # "Multi-Head Attention", "Masked Multi-Head Attention" or "Feed Forward"
         skip = x.clone()
         x = sublayer(x)
-        # "We apply dropout to the output of each sub-layer, before it is added
-        # to the sub-layer input and normalized."
         x = self.resid_drop(x)
         x += skip # "Add"
         x = self.norm(x) # "& Norm"
@@ -175,7 +206,8 @@ class EncoderLayer(nn.Module):
 
     def forward(self, x, mask=None):
         x = self.attn_resid_conn(
-            x=x, sublayer=lambda x: self.self_attn(q=x, k=x, v=x, mask=mask)[0],
+            x=x,
+            sublayer=lambda x: self.self_attn(q=x, k=x, v=x, mask=mask)[0],
         )
         x = self.ff_resid_conn(x=x, sublayer=self.feed_forward)
         return x
@@ -247,7 +279,10 @@ class DecoderLayer(nn.Module):
 
     def forward(self, x, enc_out, self_attn_mask, enc_dec_attn_mask):
         x = self.self_attn_resid_conn(
-            x=x, sublayer=lambda x: self.self_attn(q=x, k=x, v=x, mask=self_attn_mask)[0],
+            x=x,
+            sublayer=lambda x: self.self_attn(
+                q=x, k=x, v=x, mask=self_attn_mask,
+            )[0],
         )
         x = self.enc_dec_attn_resid_conn(
             x=x,
@@ -260,6 +295,10 @@ class DecoderLayer(nn.Module):
 
 
 class Decoder(nn.Module):
+    """
+    "We also use the usual learned linear transformation and softmax function
+        to convert the decoder output to predicted next-token probabilities." .
+    """
     def __init__(
         self,
         trg_vocab_size,
@@ -301,7 +340,10 @@ class Decoder(nn.Module):
         x = self.input(x)
         for dec_layer in self.dec_stack:
             x = dec_layer(
-                x, enc_out=enc_out, self_attn_mask=self_attn_mask, enc_dec_attn_mask=enc_dec_attn_mask,
+                x,
+                enc_out=enc_out,
+                self_attn_mask=self_attn_mask,
+                enc_dec_attn_mask=enc_dec_attn_mask,
             )
         x = self.linear(x)
         return x
@@ -309,6 +351,23 @@ class Decoder(nn.Module):
 
 DROP_PROB = 0.1 # "For the base model, we use a rate of $P_{drop} = 0.1$."
 class Transformer(nn.Module):
+    """
+    The Transformer uses multi-head attention in three different ways:
+    • In "encoder-decoder attention" layers, the queries come from the previous decoder layer,
+    and the memory keys and values come from the output of the encoder. This allows every
+    position in the decoder to attend over all positions in the input sequence.
+    • The encoder contains self-attention layers. In a self-attention layer all of the keys, values
+    and queries come from the same place, in this case, the output of the previous layer in the
+    encoder. Each position in the encoder can attend to all positions in the previous layer of the
+    encoder.
+    • Similarly, self-attention layers in the decoder allow each position in the decoder to attend to
+    all positions in the decoder up to and including that position. We need to prevent leftward
+    information flow in the decoder to preserve the auto-regressive property. We implement this
+    inside of scaled dot-product attention by masking out (setting to −∞) all values in the input
+    of the softmax which correspond to illegal connections.
+    "We share the same weight matrix between the two embedding layers and the
+    pre-softmax linear transformation."
+    """
     def __init__(
         self,
         src_vocab_size,
@@ -359,34 +418,41 @@ class Transformer(nn.Module):
         )
 
         if src_vocab_size == trg_vocab_size:
-            # "We share the same weight matrix between the two embedding layers
-            # and the pre-softmax linear transformation"
             self.dec.input.embed.weight = self.enc.input.embed.weight
         self.dec.linear.weight = self.dec.input.embed.weight
 
-    @staticmethod
-    def _get_pad_mask(seq, pad_id):
-        mask = (seq == pad_id).unsqueeze(1).unsqueeze(2)
-        return mask
+    def _get_src_pad_mask(self, src_seq):
+        mask = (src_seq == self.src_pad_id)
+        return einops.repeat(mask, pattern="b j -> b i j", i=self.src_max_len)
 
-    # "Prevent positions from attending to subsequent positions."
-    def _get_causal_mask(self):
+    def _get_trg_pad_mask(self, trg_seq):
+        mask = (trg_seq == self.trg_pad_id)
+        return einops.repeat(mask, pattern="b j -> b i j", i=self.trg_max_len)
+
+    def _get_enc_dec_pad_mask(self, src_seq):
+        mask = (src_seq == self.src_pad_id)
+        return einops.repeat(mask, pattern="b j -> b i j", i=self.trg_max_len)
+
+    def _get_causal_mask(self, batch_size):
+        """
+        "Prevent positions from attending to subsequent positions."
+        """
         ones = torch.ones(size=(self.trg_max_len, self.trg_max_len))
         mask = torch.triu(ones, diagonal=1).bool()
-        mask = mask.unsqueeze(0).unsqueeze(1)
-        return mask
+        return einops.repeat(mask, pattern="i j-> b i j", b=batch_size)
 
     def forward(self, src_seq, trg_seq):
-        src_pad_mask = self._get_pad_mask(seq=src_seq, pad_id=self.src_pad_id)
-        trg_pad_mask = self._get_pad_mask(seq=trg_seq, pad_id=self.trg_pad_id)
-        trg_causal_mask = self._get_causal_mask()
+        src_pad_mask = self._get_src_pad_mask(src_seq)
+        trg_pad_mask = self._get_trg_pad_mask(trg_seq)
+        causal_mask = self._get_causal_mask(batch_size=trg_seq.size(0))
+        enc_dec_pad_mask = self._get_enc_dec_pad_mask(src_seq)
 
         enc_out = self.enc(src_seq, self_attn_mask=src_pad_mask)
         dec_out = self.dec(
             trg_seq,
             enc_out=enc_out,
-            self_attn_mask=trg_pad_mask | trg_causal_mask,
-            enc_dec_attn_mask=src_pad_mask, # Source가 Query가 되고 Target이 Key가 됩니다!
+            self_attn_mask=trg_pad_mask | causal_mask,
+            enc_dec_attn_mask=enc_dec_pad_mask,
         )
         return dec_out
 
@@ -399,13 +465,13 @@ if __name__ == "__main__":
     TRG_VOCAB_SIZE = 4000
     SRC_PAD_ID = 0
     TRG_PAD_ID = 0
-    N_HEADS = 4
-    N_LAYERS = 2
+    N_HEADS = 2
+    N_LAYERS = 1
 
     src_seq = torch.randint(low=0, high=SRC_VOCAB_SIZE, size=(BATCH_SIZE, SRC_MAX_LEN))
-    src_seq[:, -1:] = 0
+    src_seq[:, -1:] = SRC_PAD_ID
     trg_seq = torch.randint(low=0, high=TRG_VOCAB_SIZE, size=(BATCH_SIZE, TRG_MAX_LEN))
-    trg_seq[:, -2:] = 0
+    trg_seq[:, -2:] = TRG_PAD_ID
 
     transformer = Transformer(
         src_vocab_size=SRC_VOCAB_SIZE,
@@ -418,4 +484,5 @@ if __name__ == "__main__":
         n_layers=N_LAYERS,
     )
 
-    out = transformer(src_seq=src_seq, trg_seq=trg_seq)
+    batch_size = 16
+    out = transformer(src_seq=src_seq.repeat(batch_size, 1), trg_seq=trg_seq.repeat(batch_size, 1))
