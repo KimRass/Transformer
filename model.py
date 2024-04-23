@@ -16,11 +16,11 @@ torch.set_printoptions(linewidth=70)
 class PositionalEncoding(nn.Module):
     """
     "We apply dropout to the sums of the embeddings and the positional
-        encodings in both the encoder and decoder stacks."
+    encodings in both the encoder and decoder stacks."
     "$$text{PE}_(\text{pos}, 2i)
-        = $\sin(\text{pos} / 10000^{2 * i  / d_{\text{model}}})$$"
+    = $\sin(\text{pos} / 10000^{2 * i  / d_{\text{model}}})$$"
     "$$text{PE}_(\text{pos}, 2i + 1)
-        = $\cos(\text{pos} / 10000^{2 * i  / d_{\text{model}}})$$"
+    = $\cos(\text{pos} / 10000^{2 * i  / d_{\text{model}}})$$"
     """
     def __init__(self, dim: int, max_len: int=5000) -> None:
         super().__init__()
@@ -46,7 +46,7 @@ class PositionalEncoding(nn.Module):
 class Embedding(nn.Module):
     """
     "In the embedding layers we multiply those weights by
-        $\sqrt{d_{text{model}}}$."
+    $\sqrt{d_{text{model}}}$."
     """
     def __init__(self, vocab_size, dim, pad_id, drop_prob):
         super().__init__()
@@ -71,14 +71,14 @@ class Embedding(nn.Module):
 
 class MultiHeadAttention(nn.Module):
     """
-    Instead of performing a single attention function with
-        $d_{model}$-dimensional keys, values and queries, we found it
-        beneficial to linearly project the queries, keys and values $h$ times
-        with different, learned linear projections to $d_{k}$, $d_{k}$ and
-        $d_{v}$ dimensions, respectively. On each of these projected versions
-        of queries, keys and values we then perform the attention function in
-        parallel, yielding $d_{v}$-dimensional output values. These are
-        concatenated and once again projected, resulting in the final values.
+    "Instead of performing a single attention function with
+    $d_{model}$-dimensional keys, values and queries, we found it
+    beneficial to linearly project the queries, keys and values $h$ times
+    with different, learned linear projections to $d_{k}$, $d_{k}$ and
+    $d_{v}$ dimensions, respectively. On each of these projected versions
+    of queries, keys and values we then perform the attention function in
+    parallel, yielding $d_{v}$-dimensional output values. These are
+    concatenated and once again projected, resulting in the final values."
     """
     def __init__(self, dim, n_heads, drop_prob):
         super().__init__()
@@ -134,10 +134,10 @@ class MultiHeadAttention(nn.Module):
 class PositionwiseFeedForward(nn.Module):
     """
     "Eeach of the layers in our encoder and decoder contains a fully connected
-        feed-forward network, which is applied to each position separately and
-        identically. This consists of two linear transformations with a ReLU
-        activation in between.
-        $$\text{FFN}(x) = \max(0, xW_{1} + b_{1} )W_{2} + b_{2}$$
+    feed-forward network, which is applied to each position separately and
+    identically. This consists of two linear transformations with a ReLU
+    activation in between.
+    $$\text{FFN}(x) = \max(0, xW_{1} + b_{1} )W_{2} + b_{2}$$
     """
     def __init__(self, dim, mlp_dim, drop_prob, activ="relu"):
         super().__init__()
@@ -485,4 +485,8 @@ if __name__ == "__main__":
     )
 
     batch_size = 16
-    out = transformer(src_seq=src_seq.repeat(batch_size, 1), trg_seq=trg_seq.repeat(batch_size, 1))
+    out = transformer(
+        src_seq=src_seq.repeat(batch_size, 1),
+        trg_seq=trg_seq.repeat(batch_size, 1),
+    )
+    out.shape
