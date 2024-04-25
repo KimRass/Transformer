@@ -91,16 +91,17 @@ class MultiHeadAttention(nn.Module):
         self.q_proj = nn.Linear(dim, dim, bias=False) # "$W^{Q}_{i}$"
         self.k_proj = nn.Linear(dim, dim, bias=False) # "$W^{K}_{i}$"
         self.v_proj = nn.Linear(dim, dim, bias=False) # "$W^{V}_{i}$"
-
+        self.scale = dim ** (-0.5)
         self.attn_drop = nn.Dropout(drop_prob) # Not in the paper
         self.out_proj = nn.Linear(dim, dim, bias=False) # "$W^{O}$"
 
-    @staticmethod
-    def _get_attention_score(q, k):
-        attn_score = torch.einsum("bnid,bnjd->bnij", q, k)
-        return attn_score
-
     def forward(self, q, k, v, mask=None):
+        """
+        "The input consists of queries and keys of dimension $d_{k}$, and values of
+        dimension $d_{v}$. We compute the dot products of the query with all keys,
+        divide each by $\sqrt{d_{k}}$, and apply a softmax function to obtain the
+        weights on the values."
+        """
         b, i, _ = q.shape
         _, j, _ = k.shape
 
@@ -112,13 +113,11 @@ class MultiHeadAttention(nn.Module):
         k = k.view(b, self.n_heads, j, self.head_dim)
         v = v.view(b, self.n_heads, j, self.head_dim)
 
-        attn_score = self._get_attention_score(q=q, k=k)
+        attn_score = torch.einsum("bnid,bnjd->bnij", q, k) * self.scale
         if mask is not None:
             mask = einops.repeat(
                 mask, pattern="b i j -> b n i j", n=self.n_heads,
             )
-            # print(attn_score.shape, mask.shape)
-            # print(mask[0, 0])
             attn_score.masked_fill_(mask=mask, value=-1e9) # "Mask (opt.)"
         attn_score /= (self.head_dim ** 0.5) # "Scale"
         attn_weight = F.softmax(attn_score, dim=3) # "Softmax"
