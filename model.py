@@ -93,7 +93,7 @@ class MultiHeadAttention(nn.Module):
         self.to_one_head = Rearrange("b i n h -> b i (n h)")
         self.out_proj = nn.Linear(d_model, d_model, bias=False)
 
-    def forward(self, q, k, v, mask):
+    def forward(self, q, k, v, mask=None):
         q = self.q_proj(q)
         k = self.k_proj(k)
         v = self.v_proj(v)
