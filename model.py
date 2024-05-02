@@ -52,7 +52,7 @@ class Embedding(nn.Module):
             embedding_dim=d_model,
             padding_idx=pad_id,
         )
-        self.scale= d_model ** 0.5
+        self.scale = d_model ** 0.5
         self.pos_enc = PositionalEncoding(d_model=d_model)
         self.embed_drop = nn.Dropout(drop_prob)
 
